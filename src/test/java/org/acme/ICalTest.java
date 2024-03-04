@@ -9,6 +9,7 @@ import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.Set;
 import static java.util.function.Predicate.not;
+import java.util.stream.Collectors;
 import net.fortuna.ical4j.data.CalendarBuilder;
 import net.fortuna.ical4j.model.Calendar;
 import net.fortuna.ical4j.model.Component;
@@ -19,6 +20,7 @@ import net.fortuna.ical4j.model.component.CalendarComponent;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 import org.threeten.extra.Interval;
 
@@ -73,14 +75,7 @@ class ICalTest {
     //https://datatracker.ietf.org/doc/html/rfc5545#section-3.2.9
     //FREEBUSY;FBTYPE=BUSY:19980415T133000Z/19980415T170000Z = Zeit is geblockt für scheduling
     Duration getProductiveTime(Calendar aCalendar, OffsetDateTime aFromDate, OffsetDateTime aToDate, TimeZoneRegistry aTimeZoneRegistry) {
-        //TODO check for SummerTime-Change
-        ZoneId zoneId = aCalendar
-                .getComponent(Component.VTIMEZONE)
-                .map(c -> c.getRequiredProperty(Property.TZID).getValue())
-                .map(aTimeZoneRegistry::getTimeZone)
-                //                .map(TimeZone::getTimeZone)
-                .map(t -> t.toZoneId())
-                .orElse(ZoneId.systemDefault());
+        ZoneId zoneId = getZoneId(aCalendar, aTimeZoneRegistry);
         System.out.println("Zone " + zoneId);
         Period<OffsetDateTime> period = new Period(aFromDate, aToDate);
         Interval interval = period.toInterval(zoneId);
@@ -90,7 +85,7 @@ class ICalTest {
                 .filter(c -> c.getProperty("TRANSP").map(Property::getValue).map("OPAQUE"::equals).orElse(false))
                 .map(c -> c.calculateRecurrenceSet(period))
                 .flatMap(Set<Period<OffsetDateTime>>::stream)
-                .map(p -> p.toInterval())
+                .map(Period::toInterval)
                 .map(i -> i.intersection(interval))
                 .map(i -> {
                     ZonedDateTime start = LocalDateTime.ofInstant(i.getStart(), ZoneOffset.UTC).atZone(zoneId);
@@ -103,6 +98,18 @@ class ICalTest {
                 .orElse(Duration.ZERO);
     }
 
+    public ZoneId getZoneId(Calendar aCalendar, TimeZoneRegistry aTimeZoneRegistry) {
+        //TODO check for SummerTime-Change
+        ZoneId zoneId = aCalendar
+                .getComponent(Component.VTIMEZONE)
+                .map(c -> c.getRequiredProperty(Property.TZID).getValue())
+                .map(aTimeZoneRegistry::getTimeZone)
+                //                .map(TimeZone::getTimeZone)
+                .map(t -> t.toZoneId())
+                .orElse(ZoneId.systemDefault());
+        return zoneId;
+    }
+
     @Test
     void shouldGetShiftAtCertainPointInTime() throws Exception {
         Calendar calendar = new CalendarBuilder().build(ICalTest.class.getResourceAsStream("/EarlyAndLateShifts.ics"));
@@ -110,7 +117,7 @@ class ICalTest {
         assertThat(getShiftId(calendar, OffsetDateTime.of(2024, 2, 22, 16, 0, 0, 0, ZoneOffset.UTC)), is("456"));
         assertThat(getShiftId(calendar, OffsetDateTime.of(2024, 2, 22, 3, 0, 0, 0, ZoneOffset.UTC)), is(nullValue()));
     }
-    
+
     Object getShiftId(Calendar aCalendar, OffsetDateTime aDate) {
         Period period = new Period(aDate, aDate);
         return aCalendar.getComponents(Component.VEVENT).stream()
@@ -123,7 +130,7 @@ class ICalTest {
                 .findFirst()
                 .map(Property::getValue)
                 .orElse(null); //TODO UUID conversion
-                
+
     }
 
     @Test
@@ -181,4 +188,53 @@ class ICalTest {
 
     }
 
+    @Test
+    void shouldNotAllowToChangeHistoryOfEventsOnUpdateOfACalendar() throws Exception {
+        //given calendar changes from 5-day week to 4-day week (friday the 8.3. is the first to be left)
+        Calendar original = new CalendarBuilder().build(ICalTest.class.getResourceAsStream("/Test_Shift_future1.ics"));
+        Calendar updated = new CalendarBuilder().build(ICalTest.class.getResourceAsStream("/Test_Shift_future2.ics"));
+        OffsetDateTime to = OffsetDateTime.of(2024, 3, 4, 0, 0, 0, 0, ZoneOffset.UTC);
+        OffsetDateTime from = to.minusDays(100);
+        Period period = new Period(from, to);
+        //when change at 04.03. and check the last 100 days
+        Set<Interval> originalEvents = original.getComponents("VEVENT").stream()
+                .map(c -> c.calculateRecurrenceSet(period))
+                .flatMap(Set<Period>::stream)
+                .map(Period::toInterval)
+                .collect(Collectors.toSet());
+        Set<Interval> updatedEvents = updated.getComponents("VEVENT").stream()
+                .map(c -> c.calculateRecurrenceSet(period))
+                .flatMap(Set<Period>::stream)
+                .map(Period::toInterval)
+                .collect(Collectors.toSet());
+        //then not changes in history
+        assertThat(originalEvents, is(updatedEvents));
+    }
+
+    @Test
+    void shouldAllowToChangeFutureOfEventsOnUpdateOfACalendar() throws Exception {
+        //given calendar changes from 5-day week to 4-day week (friday the 8.3. is the first to be left)
+        Calendar original = new CalendarBuilder().build(ICalTest.class.getResourceAsStream("/Test_Shift_future1.ics"));
+        Calendar updated = new CalendarBuilder().build(ICalTest.class.getResourceAsStream("/Test_Shift_future2.ics"));
+        OffsetDateTime to = OffsetDateTime.of(2024, 3, 11, 0, 0, 0, 0, ZoneOffset.UTC);
+        OffsetDateTime from = to.minusDays(100);
+        Period period = new Period(from, to);
+        //when change at 11.03. and check the last 100 days
+        System.err.println("original");
+        Set<Interval> originalEvents = original.getComponents("VEVENT").stream()
+                .map(c -> c.calculateRecurrenceSet(period))
+                .flatMap(Set<Period>::stream)
+                    .map(Period::toInterval)
+                .peek(System.out::println)
+                .collect(Collectors.toSet());
+        System.err.println("updated");
+        Set<Interval> updatedEvents = updated.getComponents("VEVENT").stream()
+                .map(c -> c.calculateRecurrenceSet(period))
+                .flatMap(Set<Period>::stream)
+                .map(Period::toInterval)
+                .peek(System.out::println)
+                .collect(Collectors.toSet());
+        //then changes in history
+        assertThat(originalEvents, is(Matchers.not(updatedEvents)));
+    }
 }
